@@ -109,21 +109,29 @@ def clean_title(title: str) -> str:
 
 def process_seo_title_by_bytes(client: openai.OpenAI, original_title: str, model_name: str) -> dict:
     prompt = f"""
-너는 한국 최고의 이커머스 MD이자 SEO 전문가야.
-아래 해외 상품명을 국내 오픈마켓 규격에 맞춰 2가지 버전으로 자연스럽게 작성해 줘.
+너는 한국 최고의 이커머스 MD이자 SEO 최적화 전문가야.
+아래 해외 상품명을 바탕으로, 지정된 **바이트(Byte) 한도 수치에 바짝 맞춰 꽉 채운** 고품질 한국어 상품명을 작성해 줘.
 
 [해외 원본 상품명]
 {original_title}
 
-[규칙]
-1. 50Byte 전용 (스마트스토어용): 44~50Byte 목표 (한글 22~25자 꽉 채움)
-2. 100Byte 전용 (쿠팡/11번가/G마켓용): 88~100Byte 목표 (한글 44~50자 꽉 채움)
-3. 어색한 단어 나열 금지, 자연스러운 어순 유지.
+[작성 규칙 - 필수 준수]
+1. **50Byte 전용 (스마트스토어용):**
+   - **목표 길이: 45Byte ~ 50Byte (한글 22자~25자)**
+   - 핵심 카테고리 + 대표 키워드를 자연스러운 한국어 문장/단어 조합으로 꽉 채울 것.
 
-[JSON 응답]
+2. **100Byte 전용 (쿠팡/11번가/G마켓용):**
+   - **목표 길이: 90Byte ~ 100Byte (한글 45자~50자)**
+   - 대표 키워드 + 서브 중소형 키워드 + 핵심 기능/용도 + 디자인/소재 속성을 풍부하게 조합하여 문맥이 자연스럽게 이어지도록 꽉 채울 것.
+
+3. 공통 지침:
+   - 어색한 키워드 단순 나열 금지. 소비자가 읽었을 때 자연스럽게 이해되고 구매 욕구가 생기도록 작성.
+   - 특수문자, 혜택어(최저가, 무료배송 등) 금지.
+
+[JSON 응답 규격]
 {{
-  "title_50byte": "50바이트 목표 상품명",
-  "title_100byte": "100바이트 목표 상품명",
+  "title_50byte": "45~50바이트 목표의 꽉 찬 자연스러운 상품명",
+  "title_100byte": "90~100바이트 목표의 꽉 찬 풍부한 자연스러운 상품명",
   "small_medium_keywords": ["키워드1", "키워드2", "키워드3"]
 }}
 """
@@ -132,7 +140,7 @@ def process_seo_title_by_bytes(client: openai.OpenAI, original_title: str, model
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.4
+            temperature=0.5
         )
         data = json.loads(response.choices[0].message.content)
         t50 = clean_title(data.get("title_50byte", ""))
@@ -218,7 +226,23 @@ with st.sidebar:
     extra_cost = st.number_input("기타 부대비용 (원)", value=1000, step=100)
 
 # ==========================================
-# 4. 메인 UI
+# 4. 세션 초기화 로직 (잔상 제거)
+# ==========================================
+if "form_url" not in st.session_state:
+    st.session_state["form_url"] = ""
+if "form_title" not in st.session_state:
+    st.session_state["form_title"] = ""
+if "form_price" not in st.session_state:
+    st.session_state["form_price"] = 20.0
+
+def reset_all_inputs():
+    st.session_state["form_url"] = ""
+    st.session_state["form_title"] = ""
+    st.session_state["form_price"] = 20.0
+    st.session_state["last_parsed_url"] = ""
+
+# ==========================================
+# 5. 메인 UI 구성
 # ==========================================
 st.title("⚡ SellOmni Pro :: AI SEO & 마진 분석기")
 st.caption("해외 소싱 상품의 최적 SEO 제목 추출부터 $150 관부가세 자동 감지 마진 정산까지")
@@ -229,27 +253,40 @@ col_left, col_right = st.columns([1, 1], gap="medium")
 
 with col_left:
     st.subheader("1️⃣ 소싱 데이터 입력")
-    url_val = st.text_input("소싱처 URL 입력", placeholder="https://amazon.de 또는 https://detail.1688.com...")
     
-    fetched_title = ""
-    fetched_price = 0.0
+    # URL 입력받기
+    url_input = st.text_input("소싱처 URL 입력", value=st.session_state["form_url"], key="url_key", placeholder="https://amazon.de 또는 https://detail.1688.com...")
     
-    if url_val:
-        with st.spinner("URL 분석 중..."):
-            fetched_title, fetched_price, detected_curr = fetch_product_info_from_url(url_val)
-            
-    raw_title = st.text_area("원본 상품명", value=fetched_title, height=100)
+    # URL이 새로 들어오면 파싱
+    if url_input and url_input != st.session_state.get("last_parsed_url", ""):
+        with st.spinner("URL에서 상품 정보를 가져오는 중..."):
+            f_title, f_price, f_curr = fetch_product_info_from_url(url_input)
+            st.session_state["form_url"] = url_input
+            st.session_state["last_parsed_url"] = url_input
+            if f_title:
+                st.session_state["form_title"] = f_title
+            if f_price > 0:
+                st.session_state["form_price"] = f_price
+                
+    raw_title = st.text_area("원본 상품명 (수정 가능)", value=st.session_state["form_title"], height=100, key="title_key")
     
     st.markdown("---")
     st.subheader("2️⃣ 단가 및 목표 판매가")
     
     c_p1, c_p2 = st.columns(2)
     with c_p1:
-        sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(fetched_price) if fetched_price > 0 else 20.0, step=1.0)
+        sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["form_price"]), step=1.0, key="price_key")
     with c_p2:
         target_price = st.number_input("목표 판매가 (KRW ₩)", value=49000, step=1000)
 
-    run_analysis = st.button("📊 마진 및 SEO 분석 실행", type="primary", use_container_width=True)
+    st.write("")
+    
+    # [버튼 구역] 초기화 & 마진/SEO 분석 실행 버튼
+    b_col1, b_col2 = st.columns([1, 2])
+    with b_col1:
+        st.button("🔄 입력 초기화", on_click=reset_all_inputs, use_container_width=True)
+    with b_col2:
+        run_analysis = st.button("📊 마진 및 SEO 분석 실행", type="primary", use_container_width=True)
 
 with col_right:
     st.subheader("3️⃣ 실시간 분석 리포트")
@@ -261,7 +298,7 @@ with col_right:
             client = openai.OpenAI(api_key=api_key)
             
             with st.spinner("SEO 최적화 및 마진 계산 중..."):
-                orig_title = raw_title if raw_title else fetched_title
+                orig_title = raw_title if raw_title else st.session_state["form_title"]
                 
                 if orig_title:
                     res = process_seo_title_by_bytes(client, orig_title, model_choice)
@@ -284,11 +321,11 @@ with col_right:
                     st.markdown("---")
                     st.markdown("#### 🟢 스마트스토어 전용 (50 Byte)")
                     st.code(t50, language="text")
-                    st.caption(f"바이트 규격: **{b50} / 50 Byte**")
+                    st.caption(f"바이트 규격: **{b50} / 50 Byte** (목표 범위에 가깝게 채움)")
                     
                     st.markdown("#### 🔵 쿠팡 / 11번가 / G마켓 전용 (100 Byte)")
                     st.code(t100, language="text")
-                    st.caption(f"바이트 규격: **{b100} / 100 Byte**")
+                    st.caption(f"바이트 규격: **{b100} / 100 Byte** (목표 범위에 가깝게 채움)")
                     
                     st.markdown("---")
                     st.markdown("#### 💰 마켓별 최종 순마진 정산")
