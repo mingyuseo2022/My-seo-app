@@ -22,9 +22,18 @@ st.caption("해외 상품 URL을 입력하거나 엑셀로 일괄 업로드하�
 # ==========================================
 # 사이드바: API 키 및 설정
 # ==========================================
+# Secrets에서 API 키가 설정되어 있으면 가져오기
+default_api_key = st.secrets.get("OPENAI_API_KEY", "")
+
 with st.sidebar:
     st.header("⚙️ 설정")
-    api_key = st.text_input("OpenAI API Key 입력", type="password", help="sk-... 로 시작하는 API 키를 입력하세요.")
+    api_key = st.text_input(
+        "OpenAI API Key 입력", 
+        value=default_api_key, 
+        type="password", 
+        help="sk-... 로 시작하는 API 키를 입력하세요."
+    )
+
     model_choice = st.selectbox("사용할 AI 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
     st.markdown("---")
     st.markdown("### 💡 안내 사항")
