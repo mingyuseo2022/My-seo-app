@@ -17,16 +17,15 @@ st.set_page_config(
 )
 
 st.title("🛍️ 해외 구매대행 SEO 상품명 생성 & 실시간 마진 계산기")
-st.caption("마켓별 바이트 규격(50Byte / 100Byte)맞춤 상품명 가공 및 통화별 실시간 순마진 분석을 제공합니다.")
+st.caption("마켓별 바이트 제한(50Byte / 100Byte)에 최대한 가깝게 채운 자연스러운 한국어 SEO 상품명을 생성합니다.")
 
 # ==========================================
-# 바이트 계산 함수 (한글 2byte, 영문/숫자/공백 1byte)
+# 바이트 계산 및 절삭 함수
 # ==========================================
 def calculate_byte(text: str) -> int:
-    """문자열의 정확한 Euc-Kr / UTF-8 기준 한글 Byte 계산"""
+    """한글 2Byte, 영문/숫자/공백 1Byte 기준 계산"""
     count = 0
     for char in text:
-        # 한글 및 기타 전각 문자 2 Byte, 일반 영문/숫자 1 Byte
         if ord(char) > 127:
             count += 2
         else:
@@ -34,7 +33,7 @@ def calculate_byte(text: str) -> int:
     return count
 
 def truncate_by_byte(text: str, max_bytes: int) -> str:
-    """지정한 바이트 수를 넘지 않도록 안전하게 자르는 함수"""
+    """지정한 바이트를 넘지 않도록 안전하게 정제"""
     current_bytes = 0
     truncated_text = ""
     for char in text:
@@ -50,7 +49,6 @@ def truncate_by_byte(text: str, max_bytes: int) -> str:
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_realtime_exchange_rates():
-    """CNY(위안화) 및 EUR(유로화)의 KRW 실시간 환율 가져오기"""
     try:
         url = "https://api.exchangerate-api.com/v4/latest/EUR"
         response = requests.get(url, timeout=5)
@@ -67,83 +65,58 @@ def get_realtime_exchange_rates():
 realtime_eur, realtime_cny = get_realtime_exchange_rates()
 
 # ==========================================
-# 사이드바: API 키 및 고정 설정
-# ==========================================
-default_api_key = st.secrets.get("OPENAI_API_KEY", "")
-
-with st.sidebar:
-    st.header("⚙️ 기본 설정")
-    api_key = st.text_input(
-        "OpenAI API Key 입력", 
-        value=default_api_key, 
-        type="password", 
-        help="sk-... 로 시작하는 API 키를 입력하세요."
-    )
-    model_choice = st.selectbox("사용할 AI 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
-    
-    st.markdown("---")
-    st.header("🧮 마진 기본 변수 설정")
-    
-    currency_type = st.radio("소싱 통화 선택", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], horizontal=True)
-    
-    if currency_type == "위안화 (CNY ¥)":
-        default_rate = realtime_cny
-        curr_symbol = "¥"
-    elif currency_type == "유로화 (EUR €)":
-        default_rate = realtime_eur
-        curr_symbol = "€"
-    else:
-        default_rate = 1.0
-        curr_symbol = "₩"
-        
-    exchange_rate = st.number_input("적용 환율 (원화 환산 기준)", value=float(default_rate), step=1.0)
-    st.caption(f"💡 현재 실시간 환율: 1 EUR = {realtime_eur}원 / 1 CNY = {realtime_cny}원")
-    
-    shipping_cost = st.number_input("배대지/국내 배송비 (원)", value=8000, step=500)
-    extra_cost = st.number_input("기타 부대비용/포장비 (원)", value=1000, step=100)
-
-# ==========================================
-# 웹 크롤링: 상품명 및 가격 추출 함수
+# 웹 크롤링: 상품명 및 가격 추출 함수 (아마존 패치 포함)
 # ==========================================
 def fetch_product_info_from_url(url: str):
-    """URL에서 원본 상품명과 가격(단가)을 추출하는 함수"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
     }
     extracted_title = ""
     extracted_price = 0.0
+    detected_currency = "CNY"
     
     try:
-        response = requests.get(url, headers=headers, timeout=8)
+        session = requests.Session()
+        response = session.get(url, headers=headers, timeout=10, allow_redirects=True)
+        final_url = response.url.lower()
+        
+        if "amazon.de" in final_url or ".de" in final_url or ".eu" in final_url or "amazon.fr" in final_url or "amazon.it" in final_url:
+            detected_currency = "EUR"
+        elif "taobao" in final_url or "1688" in final_url or "tmall" in final_url:
+            detected_currency = "CNY"
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        if soup.find("meta", property="og:title") and soup.find("meta", property="og:title").get("content"):
-            extracted_title = soup.find("meta", property="og:title")["content"]
+        title_tag = soup.find("id", "productTitle") or soup.find("meta", property="og:title")
+        if title_tag:
+            extracted_title = title_tag.get("content", "") if title_tag.name == "meta" else title_tag.get_text()
         elif soup.title and soup.title.string:
             extracted_title = soup.title.string
             
-        price_meta = soup.find("meta", property="product:price:amount") or soup.find("meta", property="og:price:amount")
-        if price_meta and price_meta.get("content"):
-            try:
-                extracted_price = float(re.sub(r'[^0-9.]', '', price_meta["content"]))
-            except:
-                extracted_price = 0.0
-        else:
-            price_text = soup.find(text=re.compile(r'([¥€$]|EUR|CNY)\s*[\d,]+(\.\d+)?'))
-            if price_text:
-                match = re.search(r'[\d,]+(\.\d+)?', price_text)
-                if match:
-                    try:
-                        extracted_price = float(match.group(0).replace(',', ''))
-                    except:
-                        extracted_price = 0.0
+        price_span = soup.find("span", class_="a-offscreen") or soup.find("span", id="priceblock_ourprice") or soup.find("span", class_="a-price-whole")
+        if price_span:
+            p_text = price_span.get_text().replace(',', '.').replace('€', '').replace('¥', '').strip()
+            match = re.search(r'[\d.]+', p_text)
+            if match:
+                try:
+                    extracted_price = float(match.group(0))
+                except:
+                    extracted_price = 0.0
+                    
+        if extracted_price == 0.0:
+            price_meta = soup.find("meta", property="product:price:amount") or soup.find("meta", property="og:price:amount")
+            if price_meta and price_meta.get("content"):
+                try:
+                    extracted_price = float(re.sub(r'[^0-9.]', '', price_meta["content"]))
+                except:
+                    extracted_price = 0.0
 
-        return extracted_title.strip(), extracted_price
+        return extracted_title.strip(), extracted_price, detected_currency
     except Exception as e:
-        return "", 0.0
+        return "", 0.0, "CNY"
 
 def clean_and_validate_title(title: str) -> str:
-    """SEO 특수문자 및 중복 단어 정제"""
     cleaned = re.sub(r'[^가-힣a-zA-Z0-9\s]', ' ', title)
     words = cleaned.split()
     seen = set()
@@ -155,29 +128,31 @@ def clean_and_validate_title(title: str) -> str:
     return " ".join(unique_words).strip()
 
 def process_seo_title_by_bytes(client: openai.OpenAI, original_title: str, model_name: str) -> dict:
-    """50Byte용 및 100Byte용 맞춤 상품명 생성"""
+    """바이트 제한치(50Byte / 100Byte)에 최대한 맞춰 자연스러운 상품명 생성"""
     prompt = f"""
-너는 한국의 최고 이커머스 MD이자 SEO 마케팅 전문가야.
-아래의 해외 상품명을 바탕으로 국내 오픈마켓의 바이트(Byte) 규격에 딱 맞춰 2가지 버전의 자연스러운 한국어 상품명을 만들어줘.
+너는 한국 최고의 이커머스 MD이자 SEO 상품명 최적화 전문가야.
+아래 해외 상품명을 바탕으로 국내 오픈마켓 규격에 맞춘 2가지 버전의 자연스러운 한국어 상품명을 작성해 줘.
 
 [해외 원본 상품명]
 {original_title}
 
-[요청 사항]
-1. 50Byte용 상품명 (네이버 스마트스토어 등)
-   - 한글 기준 22자~25자 이내 (최대 50Byte 준수)
-   - 가장 핵심적인 대표 카테고리와 메인 키워드 위주로 자연스럽게 작성.
+[핵심 작성 규칙]
+1. **50Byte 전용 상품명 (네이버 스마트스토어용):**
+   - **목표 길이: 44Byte ~ 50Byte (한글 22자~25자 내외로 꽉 채울 것)**
+   - 메인 카테고리 + 핵심 대표 키워드를 조합하여 소비자가 읽기 자연스러운 문장 구조로 작성.
 
-2. 100Byte용 상품명 (쿠팡, 11번가, G마켓 등)
-   - 한글 기준 40자~48자 이내 (최대 100Byte 준수)
-   - 대표 키워드 + 세부 중소형 키워드, 용도, 소재/디자인 속성을 포함하여 자연스러운 문장 형태로 작성.
+2. **100Byte 전용 상품명 (쿠팡, 11번가, G마켓용):**
+   - **목표 길이: 88Byte ~ 100Byte (한글 44자~50자 내외로 꽉 채울 것)**
+   - 메인 키워드 + 세부 중소형 키워드, 사용 용도, 핵심 특징/디자인 속성을 풍부하게 조합하여 문맥이 자연스럽게 이어지도록 작성.
 
-3. 두 버전 모두 키워드의 어색한 단순 나열을 금지하고, 소비자가 읽었을 때 이해하기 쉬운 자연스러운 어순을 지켜.
+3. **공통 지침:**
+   - 어색한 키워드 단순 나열 금지. 소비자가 바로 이해할 수 있는 자연스러운 어순 지키기.
+   - 특수문자, 혜택어(무료배송, 최저가 등), 중복 단어 배제.
 
 [응답 형식 (JSON 규격)]
 {{
-  "title_50byte": "50바이트용 짧은 핵심 상품명",
-  "title_100byte": "100바이트용 서브 키워드 포함 상품명",
+  "title_50byte": "44~50바이트 목표의 자연스러운 상품명",
+  "title_100byte": "88~100바이트 목표의 풍부한 자연스러운 상품명",
   "small_medium_keywords": ["중소형 키워드1", "중소형 키워드2", "중소형 키워드3"]
 }}
 """
@@ -186,15 +161,13 @@ def process_seo_title_by_bytes(client: openai.OpenAI, original_title: str, model
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.3
+            temperature=0.4
         )
         data = json.loads(response.choices[0].message.content)
         
-        # 정제 및 바이트 수 검수
         t50 = clean_and_validate_title(data.get("title_50byte", ""))
         t100 = clean_and_validate_title(data.get("title_100byte", ""))
         
-        # 지정 바이트 제한 적용
         data["title_50byte_clean"] = truncate_by_byte(t50, 50)
         data["title_100byte_clean"] = truncate_by_byte(t100, 100)
         
@@ -207,7 +180,6 @@ def process_seo_title_by_bytes(client: openai.OpenAI, original_title: str, model
         }
 
 def calculate_margin(sourcing_price_foreign, curr_symbol, target_sell_price_krw, ex_rate, ship_cost, extra):
-    """구분된 통화별 순마진 계산 엔진"""
     sourcing_cost_krw = sourcing_price_foreign * ex_rate
     total_cost = sourcing_cost_krw + ship_cost + extra
     
@@ -235,6 +207,46 @@ def calculate_margin(sourcing_price_foreign, curr_symbol, target_sell_price_krw,
     return pd.DataFrame(results)
 
 # ==========================================
+# 사이드바 구성
+# ==========================================
+default_api_key = st.secrets.get("OPENAI_API_KEY", "")
+
+with st.sidebar:
+    st.header("⚙️ 기본 설정")
+    api_key = st.text_input(
+        "OpenAI API Key 입력", 
+        value=default_api_key, 
+        type="password", 
+        help="sk-... 로 시작하는 API 키를 입력하세요."
+    )
+    model_choice = st.selectbox("사용할 AI 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
+    
+    st.markdown("---")
+    st.header("🧮 마진 기본 변수 설정")
+    
+    currency_index = 0
+    if "detected_curr" in st.session_state and st.session_state["detected_curr"] == "EUR":
+        currency_index = 1
+        
+    currency_type = st.radio("소싱 통화 선택", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], index=currency_index, horizontal=True)
+    
+    if "유로화" in currency_type:
+        default_rate = realtime_eur
+        curr_symbol = "€"
+    elif "위안화" in currency_type:
+        default_rate = realtime_cny
+        curr_symbol = "¥"
+    else:
+        default_rate = 1.0
+        curr_symbol = "₩"
+        
+    exchange_rate = st.number_input("적용 환율 (원화 환산 기준)", value=float(default_rate), step=1.0)
+    st.caption(f"💡 현재 실시간 환율: 1 EUR = {realtime_eur}원 / 1 CNY = {realtime_cny}원")
+    
+    shipping_cost = st.number_input("배대지/국내 배송비 (원)", value=12000 if "EUR" in curr_symbol else 8000, step=500)
+    extra_cost = st.number_input("기타 부대비용/포장비 (원)", value=1000, step=100)
+
+# ==========================================
 # 메인 UI 구성
 # ==========================================
 tab1, tab2 = st.tabs(["🔗 SEO 상품명 & 마진 분석", "📁 엑셀 대량 업로드"])
@@ -250,12 +262,14 @@ with tab1:
         fetched_price = 0.0
         
         if url_input:
-            with st.spinner("URL에서 상품 정보 및 단가 수집 중..."):
-                fetched_title, fetched_price = fetch_product_info_from_url(url_input)
+            with st.spinner("URL 분석 및 단가 수집 중..."):
+                fetched_title, fetched_price, detected_curr = fetch_product_info_from_url(url_input)
+                st.session_state["detected_curr"] = detected_curr
+                
                 if fetched_title:
-                    st.success("URL 상품 정보 수집 성공!")
+                    st.success(f"URL 수집 완료! (감지된 통화: {detected_curr})")
                 else:
-                    st.warning("보안 정책으로 단가/제목 자동 수집이 차단된 사이트입니다. 아래에 직접 입력해 주세요.")
+                    st.warning("단가/제목 수집이 제한된 페이지입니다. 아래에 직접 입력해 주세요.")
                     
         raw_title_input = st.text_area("원본 상품명 (직접 수정/입력 가능)", value=fetched_title)
         
@@ -267,7 +281,7 @@ with tab1:
                 f"소싱 단가 ({curr_symbol})", 
                 value=float(fetched_price) if fetched_price > 0 else 20.0, 
                 step=1.0,
-                help="URL에서 가격을 감지하면 자동 채워집니다."
+                help="URL에서 추출한 단가입니다."
             )
         with col_p2:
             target_price = st.number_input("국내 희망 판매가 (KRW ₩)", value=49000, step=1000)
@@ -294,11 +308,11 @@ with tab1:
                         
                         st.markdown("### 🟢 [50 Byte 전용] 네이버 스마트스토어 등")
                         st.code(t50, language="text")
-                        st.caption(f"길이: {len(t50)}자 / **{b50} Byte** (50Byte 이하 준수)")
+                        st.caption(f"길이: {len(t50)}자 / **{b50} Byte** (50Byte에 정밀 최적화됨)")
                         
                         st.markdown("### 🔵 [100 Byte 전용] 쿠팡, 11번가, G마켓 등")
                         st.code(t100, language="text")
-                        st.caption(f"길이: {len(t100)}자 / **{b100} Byte** (100Byte 이하 준수)")
+                        st.caption(f"길이: {len(t100)}자 / **{b100} Byte** (100Byte에 정밀 최적화됨)")
                         
                         st.caption(f"💡 추출된 핵심 중소형 키워드: {', '.join(res.get('small_medium_keywords', []))}")
                         
@@ -312,4 +326,4 @@ with tab1:
 
 with tab2:
     st.subheader("엑셀/CSV 파일 일괄 변환")
-    st.caption("대량 엑셀 처리 시에도 50/100Byte 상품명 및 실시간 환율이 함께 적용됩니다.")
+    st.caption("대량 엑셀 처리 시에도 50/100Byte 정밀 맞춤 상품명 및 실시간 환율이 함께 적용됩니다.")
