@@ -81,7 +81,6 @@ def fetch_product_info_from_url(url: str):
             
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 상품명
         title_tag = soup.find("span", id="productTitle") or soup.find("meta", property="og:title")
         if title_tag:
             title = title_tag.get("content", "") if title_tag.name == "meta" else title_tag.get_text()
@@ -90,7 +89,6 @@ def fetch_product_info_from_url(url: str):
             
         title = title.replace("Amazon.de:", "").replace("Amazon.de", "").strip()
 
-        # 정밀 가격 (독일 아마존 수수료/소수점 파싱)
         price_whole = soup.find("span", class_="a-price-whole")
         price_fraction = soup.find("span", class_="a-price-fraction")
         if price_whole:
@@ -229,14 +227,14 @@ if "title_input" not in st.session_state:
     st.session_state["title_input"] = ""
 if "price_input" not in st.session_state:
     st.session_state["price_input"] = 20.0
-if "curr_choice" not in st.session_state:
-    st.session_state["curr_choice"] = "위안화 (CNY ¥)"
+if "active_curr" not in st.session_state:
+    st.session_state["active_curr"] = "CNY"
 
 def reset_data():
     st.session_state["url_input"] = ""
     st.session_state["title_input"] = ""
     st.session_state["price_input"] = 20.0
-    st.session_state["curr_choice"] = "위안화 (CNY ¥)"
+    st.session_state["active_curr"] = "CNY"
     st.rerun()
 
 # ==========================================
@@ -254,19 +252,20 @@ with st.sidebar:
     
     st.markdown("---")
     
-    currency_options = ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"]
-    try:
-        c_idx = currency_options.index(st.session_state["curr_choice"])
-    except Exception:
-        c_idx = 0
+    # 통화 수동 수정을 위한 라디오
+    radio_curr = st.radio("소싱 통화 선택", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], horizontal=True)
+    if "유로화" in radio_curr:
+        st.session_state["active_curr"] = "EUR"
+    elif "위안화" in radio_curr:
+        st.session_state["active_curr"] = "CNY"
+    else:
+        st.session_state["active_curr"] = "KRW"
         
-    currency_type = st.radio("소싱 통화", currency_options, index=c_idx, key="curr_radio", horizontal=True)
-    st.session_state["curr_choice"] = currency_type
-    
-    if "유로화" in currency_type:
+    # 현재 감지된 통화에 맞춘 기호 및 환율 결정
+    if st.session_state["active_curr"] == "EUR":
         default_rate = realtime_eur
         curr_symbol = "€"
-    elif "위안화" in currency_type:
+    elif st.session_state["active_curr"] == "CNY":
         default_rate = realtime_cny
         curr_symbol = "¥"
     else:
@@ -274,7 +273,7 @@ with st.sidebar:
         curr_symbol = "₩"
         
     exchange_rate = st.number_input("적용 환율", value=float(default_rate), step=1.0)
-    shipping_cost = st.number_input("배송비 (원)", value=12000 if "EUR" in curr_symbol else 8000, step=500)
+    shipping_cost = st.number_input("배송비 (원)", value=12000 if "EUR" in st.session_state["active_curr"] else 8000, step=500)
     extra_cost = st.number_input("기타 부대비용 (원)", value=1000, step=100)
 
 # ==========================================
@@ -302,11 +301,8 @@ with col_left:
                 f_title, f_price, f_curr = fetch_product_info_from_url(url_val)
                 st.session_state["url_input"] = url_val
                 
-                # 독일 아마존 수집 시 즉시 유로화 자동 강제 전환
-                if f_curr == "EUR":
-                    st.session_state["curr_choice"] = "유로화 (EUR €)"
-                elif f_curr == "CNY":
-                    st.session_state["curr_choice"] = "위안화 (CNY ¥)"
+                # 수집된 통화 세션 즉시 업데이트
+                st.session_state["active_curr"] = f_curr
                     
                 if f_title:
                     st.session_state["title_input"] = f_title
@@ -321,6 +317,7 @@ with col_left:
     
     c_p1, c_p2 = st.columns(2)
     with c_p1:
+        # st.session_state["active_curr"]에 기반한 정확한 통화 기호 표시
         sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["price_input"]), step=1.0)
     with c_p2:
         target_price = st.number_input("목표 판매가 (KRW ₩)", value=49000, step=1000)
