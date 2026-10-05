@@ -18,6 +18,7 @@ st.set_page_config(
 )
 
 # Custom CSS (전문가용 대시보드 스타일)
+# 옵션을 unsafe_allow_html=True 로 정확히 수정했습니다.
 st.markdown("""
 <style>
     /* 메인 배경 및 폰트 정의 */
@@ -61,7 +62,7 @@ st.markdown("""
         font-weight: 700;
     }
 </style>
-""", unsafe_allow_shortcut=True)
+""", unsafe_allow_html=True)
 
 # ==========================================
 # 바이트 계산 및 절삭 함수
@@ -228,4 +229,146 @@ def calculate_margin(sourcing_price_foreign, curr_symbol, target_sell_price_krw,
     price_in_usd = (sourcing_cost_krw / usd_rate) if usd_rate > 0 else 0.0
     
     if price_in_usd > 150.0:
-        customs_duty = sourcing_cost_krw * 0
+        customs_duty = sourcing_cost_krw * 0.08
+        vat = (sourcing_cost_krw + customs_duty) * 0.10
+        duty_tax_krw = customs_duty + vat
+        duty_status_text = f"{int(duty_tax_krw):,}원 (과세: ${price_in_usd:.1f})"
+    else:
+        duty_tax_krw = 0.0
+        duty_status_text = f"0원 (면세: ${price_in_usd:.1f})"
+    
+    total_cost = sourcing_cost_krw + duty_tax_krw + ship_cost + extra
+    
+    fee_rates = {
+        "네이버 스마트스토어 (약 5.63%)": 0.0563,
+        "쿠팡 (약 10.8%)": 0.1080,
+        "11번가 / G마켓 (약 13%)": 0.1300
+    }
+    
+    results = []
+    for market, fee_rate in fee_rates.items():
+        market_fee = target_sell_price_krw * fee_rate
+        net_profit = target_sell_price_krw - total_cost - market_fee
+        margin_rate = (net_profit / target_sell_price_krw * 100) if target_sell_price_krw > 0 else 0
+        
+        results.append({
+            "오픈마켓": market,
+            f"현지 원가 ({curr_symbol})": f"{sourcing_price_foreign:,.2f} {curr_symbol}",
+            "한화 원가": f"{int(sourcing_cost_krw):,}원",
+            "관부가세": duty_status_text,
+            "총 매입원가": f"{int(total_cost):,}원",
+            "예상 판매가": f"{int(target_sell_price_krw):,}원",
+            "마켓 수수료": f"{int(market_fee):,}원",
+            "순마진(수익)": f"{int(net_profit):,}원",
+            "순마진율(%)": f"{margin_rate:.1f}%"
+        })
+    return pd.DataFrame(results), total_cost, duty_tax_krw
+
+# ==========================================
+# 사이드바 구성
+# ==========================================
+default_api_key = st.secrets.get("OPENAI_API_KEY", "")
+
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/lightning-bolt.png", width=50)
+    st.title("SellOmni Pro")
+    st.caption("Cross-border E-commerce Suite")
+    st.markdown("---")
+    
+    st.subheader("⚙️ API 및 모델 설정")
+    api_key = st.text_input(
+        "OpenAI API Key", 
+        value=default_api_key, 
+        type="password", 
+        help="API Key를 등록하면 세션 동안 유지됩니다."
+    )
+    model_choice = st.selectbox("AI 엔진 선택", ["gpt-4o-mini", "gpt-4o"], index=0)
+    
+    st.markdown("---")
+    st.subheader("🧮 마진 파라미터")
+    
+    currency_index = 0
+    if "detected_curr" in st.session_state and st.session_state["detected_curr"] == "EUR":
+        currency_index = 1
+        
+    currency_type = st.radio("소싱 통화", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], index=currency_index, horizontal=True)
+    
+    if "유로화" in currency_type:
+        default_rate = realtime_eur
+        curr_symbol = "€"
+    elif "위안화" in currency_type:
+        default_rate = realtime_cny
+        curr_symbol = "¥"
+    else:
+        default_rate = 1.0
+        curr_symbol = "₩"
+        
+    exchange_rate = st.number_input("적용 환율 (원화)", value=float(default_rate), step=1.0)
+    
+    shipping_cost = st.number_input("배대지/내륙 배송비 (원)", value=12000 if "EUR" in curr_symbol else 8000, step=500)
+    extra_cost = st.number_input("포장 및 기타 부대비용 (원)", value=1000, step=100)
+
+# ==========================================
+# 메인 헤더
+# ==========================================
+col_h1, col_h2 = st.columns([3, 1])
+with col_h1:
+    st.title("⚡ SellOmni Pro :: AI SEO & 마진 분석기")
+    st.caption("해외 소싱 상품의 최적 SEO 제목 추출부터 $150 관부가세 자동 감지 마진 정산까지 한눈에")
+with col_h2:
+    st.metric(label="실시간 EUR 환율", value=f"{realtime_eur}원")
+
+st.markdown("---")
+
+# ==========================================
+# 초기화 버튼 세션 로직
+# ==========================================
+if "input_url" not in st.session_state:
+    st.session_state["input_url"] = ""
+if "input_title" not in st.session_state:
+    st.session_state["input_title"] = ""
+if "input_price" not in st.session_state:
+    st.session_state["input_price"] = 20.0
+
+def reset_fields():
+    st.session_state["input_url"] = ""
+    st.session_state["input_title"] = ""
+    st.session_state["input_price"] = 20.0
+    if "detected_curr" in st.session_state:
+        del st.session_state["detected_curr"]
+
+# ==========================================
+# 메인 레이아웃 (2 칼럼)
+# ==========================================
+col_left, col_right = st.columns([1.1, 1], gap="medium")
+
+with col_left:
+    st.subheader("1️⃣ 소싱 데이터 입력")
+    
+    url_val = st.text_input("소싱처 URL 입력", value=st.session_state["input_url"], key="url_widget", placeholder="https://amazon.de 또는 https://detail.1688.com...")
+    
+    fetched_title = ""
+    fetched_price = 0.0
+    
+    if url_val and url_val != st.session_state.get("last_url", ""):
+        with st.spinner("URL 데이터 파싱 중..."):
+            fetched_title, fetched_price, detected_curr = fetch_product_info_from_url(url_val)
+            st.session_state["detected_curr"] = detected_curr
+            st.session_state["last_url"] = url_val
+            if fetched_title:
+                st.session_state["input_title"] = fetched_title
+            if fetched_price > 0:
+                st.session_state["input_price"] = fetched_price
+                
+    raw_title = st.text_area("원본 상품명", value=st.session_state["input_title"], height=100, key="title_widget")
+    
+    st.markdown("---")
+    st.subheader("2️⃣ 단가 및 목표 판매가")
+    
+    c_p1, c_p2 = st.columns(2)
+    with c_p1:
+        sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["input_price"]), step=1.0)
+    with c_p2:
+        target_price = st.number_input("목표 판매가 (KRW ₩)", value=49000, step=1000)
+
+    st.markdown("<br>",
