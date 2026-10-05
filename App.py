@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import random
 import pandas as pd
 import requests
 import streamlit as st
@@ -17,10 +18,9 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. 핵심 연산 및 유틸리티 함수
+# 2. 바이트 계산 및 유틸리티
 # ==========================================
 def calculate_byte(text: str) -> int:
-    """한글 2Byte, 영문/숫자/공백 1Byte 기준 계산"""
     count = 0
     for char in text:
         if ord(char) > 127:
@@ -30,7 +30,6 @@ def calculate_byte(text: str) -> int:
     return count
 
 def truncate_by_byte(text: str, max_bytes: int) -> str:
-    """지정한 바이트를 넘지 않도록 절삭"""
     current_bytes = 0
     truncated_text = ""
     for char in text:
@@ -43,7 +42,6 @@ def truncate_by_byte(text: str, max_bytes: int) -> str:
 
 @st.cache_data(ttl=3600)
 def get_realtime_exchange_rates():
-    """실시간 환율 수집"""
     try:
         url = "https://api.exchangerate-api.com/v4/latest/USD"
         res = requests.get(url, timeout=5)
@@ -59,39 +57,88 @@ def get_realtime_exchange_rates():
 
 realtime_usd, realtime_eur, realtime_cny = get_realtime_exchange_rates()
 
+# ==========================================
+# 3. 고도화된 스크래핑 엔진 (차단 우회 및 가격 자동 탐지)
+# ==========================================
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+]
+
 def fetch_product_info_from_url(url: str):
-    """URL에서 정보 추출"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
+    
     title = ""
     price = 0.0
     curr = "CNY"
+    
     try:
         session = requests.Session()
-        res = session.get(url, headers=headers, timeout=10, allow_redirects=True)
+        res = session.get(url, headers=headers, timeout=12, allow_redirects=True)
         final_url = res.url.lower()
         
-        if "amazon.de" in final_url or ".de" in final_url or ".eu" in final_url:
+        if any(domain in final_url for domain in ["amazon.de", ".de", ".eu", "amazon.fr", "amazon.it"]):
             curr = "EUR"
-        elif "taobao" in final_url or "1688" in final_url or "tmall" in final_url:
+        elif any(domain in final_url for domain in ["taobao", "1688", "tmall"]):
             curr = "CNY"
             
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        t_tag = soup.find(id="productTitle") or soup.find("meta", property="og:title")
-        if t_tag:
-            title = t_tag.get("content", "") if t_tag.name == "meta" else t_tag.get_text()
-        elif soup.title and soup.title.string:
-            title = soup.title.string
-            
-        p_span = soup.find("span", class_="a-offscreen") or soup.find("span", id="priceblock_ourprice")
-        if p_span:
-            p_text = p_span.get_text().replace(',', '.').replace('€', '').replace('¥', '').strip()
-            match = re.search(r'[\d.]+', p_text)
-            if match:
-                price = float(match.group(0))
+        # 1) JSON-LD 구조화 데이터에서 탐색
+        for json_script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(json_script.string)
+                if isinstance(data, list):
+                    data = data[0]
+                if "name" in data and not title:
+                    title = data["name"]
+                if "offers" in data:
+                    offers = data["offers"]
+                    if isinstance(offers, list):
+                        offers = offers[0]
+                    if "price" in offers:
+                        price = float(str(offers["price"]).replace(',', '.'))
+            except Exception:
+                pass
+
+        # 2) HTML 메타태그 / 제목 선택자 탐색
+        if not title:
+            t_tag = soup.find(id="productTitle") or soup.find("meta", property="og:title") or soup.find("h1")
+            if t_tag:
+                title = t_tag.get("content", "") if t_tag.name == "meta" else t_tag.get_text()
+            elif soup.title and soup.title.string:
+                title = soup.title.string
+                
+        # 3) 가격 탐색 (멀티 셀렉터 패치)
+        if price == 0.0:
+            price_selectors = [
+                ("span", {"class": "a-price-whole"}),
+                ("span", {"class": "a-offscreen"}),
+                ("span", {"id": "priceblock_ourprice"}),
+                ("span", {"id": "priceblock_dealprice"}),
+                ("div", {"class": "priceToPay"})
+            ]
+            for tag_name, attrs in price_selectors:
+                p_elem = soup.find(tag_name, attrs)
+                if p_elem:
+                    p_text = p_elem.get_text().replace(',', '.').replace('€', '').replace('¥', '').strip()
+                    match = re.search(r'[\d.]+', p_text)
+                    if match:
+                        try:
+                            val = float(match.group(0))
+                            if val > 0:
+                                price = val
+                                break
+                        except Exception:
+                            pass
+                            
         return title.strip(), price, curr
     except Exception:
         return "", 0.0, "CNY"
@@ -196,7 +243,7 @@ def calculate_margin(sourcing_price, curr_symbol, target_price, ex_rate, usd_rat
     return pd.DataFrame(results), total_cost, duty_tax
 
 # ==========================================
-# 3. 사이드바 UI
+# 4. 사이드바 UI
 # ==========================================
 default_api_key = st.secrets.get("OPENAI_API_KEY", "")
 
@@ -226,23 +273,23 @@ with st.sidebar:
     extra_cost = st.number_input("기타 부대비용 (원)", value=1000, step=100)
 
 # ==========================================
-# 4. 세션 초기화 로직 (잔상 제거)
+# 5. 세션 관리 및 초기화 함수 (잔상 완전 제거)
 # ==========================================
-if "form_url" not in st.session_state:
-    st.session_state["form_url"] = ""
-if "form_title" not in st.session_state:
-    st.session_state["form_title"] = ""
-if "form_price" not in st.session_state:
-    st.session_state["form_price"] = 20.0
+if "url_input" not in st.session_state:
+    st.session_state["url_input"] = ""
+if "title_input" not in st.session_state:
+    st.session_state["title_input"] = ""
+if "price_input" not in st.session_state:
+    st.session_state["price_input"] = 20.0
 
-def reset_all_inputs():
-    st.session_state["form_url"] = ""
-    st.session_state["form_title"] = ""
-    st.session_state["form_price"] = 20.0
-    st.session_state["last_parsed_url"] = ""
+def reset_data():
+    st.session_state["url_input"] = ""
+    st.session_state["title_input"] = ""
+    st.session_state["price_input"] = 20.0
+    st.rerun()
 
 # ==========================================
-# 5. 메인 UI 구성
+# 6. 메인 레이아웃 UI
 # ==========================================
 st.title("⚡ SellOmni Pro :: AI SEO & 마진 분석기")
 st.caption("해외 소싱 상품의 최적 SEO 제목 추출부터 $150 관부가세 자동 감지 마진 정산까지")
@@ -254,38 +301,42 @@ col_left, col_right = st.columns([1, 1], gap="medium")
 with col_left:
     st.subheader("1️⃣ 소싱 데이터 입력")
     
-    # URL 입력받기
-    url_input = st.text_input("소싱처 URL 입력", value=st.session_state["form_url"], key="url_key", placeholder="https://amazon.de 또는 https://detail.1688.com...")
+    # URL 입력 및 자동 수집
+    url_val = st.text_input(
+        "소싱처 URL 입력", 
+        value=st.session_state["url_input"], 
+        placeholder="https://amazon.de 또는 https://detail.1688.com..."
+    )
     
-    # URL이 새로 들어오면 파싱
-    if url_input and url_input != st.session_state.get("last_parsed_url", ""):
-        with st.spinner("URL에서 상품 정보를 가져오는 중..."):
-            f_title, f_price, f_curr = fetch_product_info_from_url(url_input)
-            st.session_state["form_url"] = url_input
-            st.session_state["last_parsed_url"] = url_input
-            if f_title:
-                st.session_state["form_title"] = f_title
-            if f_price > 0:
-                st.session_state["form_price"] = f_price
+    if st.button("🔗 URL 데이터 가져오기", use_container_width=True):
+        if url_val:
+            with st.spinner("해외 소싱몰 페이지 스크래핑 중..."):
+                f_title, f_price, f_curr = fetch_product_info_from_url(url_val)
+                st.session_state["url_input"] = url_val
+                if f_title:
+                    st.session_state["title_input"] = f_title
+                if f_price > 0:
+                    st.session_state["price_input"] = f_price
+                st.rerun()
                 
-    raw_title = st.text_area("원본 상품명 (수정 가능)", value=st.session_state["form_title"], height=100, key="title_key")
+    raw_title = st.text_area("원본 상품명 (수정 가능)", value=st.session_state["title_input"], height=100)
     
     st.markdown("---")
     st.subheader("2️⃣ 단가 및 목표 판매가")
     
     c_p1, c_p2 = st.columns(2)
     with c_p1:
-        sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["form_price"]), step=1.0, key="price_key")
+        sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["price_input"]), step=1.0)
     with c_p2:
         target_price = st.number_input("목표 판매가 (KRW ₩)", value=49000, step=1000)
 
     st.write("")
     
-    # [버튼 구역] 초기화 & 마진/SEO 분석 실행 버튼
-    b_col1, b_col2 = st.columns([1, 2])
-    with b_col1:
-        st.button("🔄 입력 초기화", on_click=reset_all_inputs, use_container_width=True)
-    with b_col2:
+    # [버튼 구역] 초기화 & 실행 확인 버튼
+    btn_c1, btn_c2 = st.columns([1, 2])
+    with btn_c1:
+        st.button("🔄 입력 초기화", on_click=reset_data, use_container_width=True)
+    with btn_c2:
         run_analysis = st.button("📊 마진 및 SEO 분석 실행", type="primary", use_container_width=True)
 
 with col_right:
@@ -297,8 +348,8 @@ with col_right:
         else:
             client = openai.OpenAI(api_key=api_key)
             
-            with st.spinner("SEO 최적화 및 마진 계산 중..."):
-                orig_title = raw_title if raw_title else st.session_state["form_title"]
+            with st.spinner("AI SEO 최적화 및 마진 정산 중..."):
+                orig_title = raw_title if raw_title else st.session_state["title_input"]
                 
                 if orig_title:
                     res = process_seo_title_by_bytes(client, orig_title, model_choice)
@@ -321,11 +372,11 @@ with col_right:
                     st.markdown("---")
                     st.markdown("#### 🟢 스마트스토어 전용 (50 Byte)")
                     st.code(t50, language="text")
-                    st.caption(f"바이트 규격: **{b50} / 50 Byte** (목표 범위에 가깝게 채움)")
+                    st.caption(f"바이트 규격: **{b50} / 50 Byte** (목표 가깝게 최적화 완료)")
                     
                     st.markdown("#### 🔵 쿠팡 / 11번가 / G마켓 전용 (100 Byte)")
                     st.code(t100, language="text")
-                    st.caption(f"바이트 규격: **{b100} / 100 Byte** (목표 범위에 가깝게 채움)")
+                    st.caption(f"바이트 규격: **{b100} / 100 Byte** (목표 가깝게 최적화 완료)")
                     
                     st.markdown("---")
                     st.markdown("#### 💰 마켓별 최종 순마진 정산")
@@ -333,4 +384,4 @@ with col_right:
                 else:
                     st.warning("상품명 정보 또는 URL을 입력해 주세요.")
     else:
-        st.info("👈 상품 정보를 입력한 후 [📊 마진 및 SEO 분석 실행] 버튼을 눌러주세요.")
+        st.info("👈 상품 정보를 입력하거나 **[🔗 URL 데이터 가져오기]**를 누른 후 **[📊 마진 및 SEO 분석 실행]** 버튼을 눌러주세요.")
