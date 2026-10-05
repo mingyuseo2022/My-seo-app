@@ -57,7 +57,7 @@ def get_realtime_exchange_rates():
 realtime_usd, realtime_eur, realtime_cny = get_realtime_exchange_rates()
 
 # ==========================================
-# 3. 안전한 소싱몰 크롤링 엔진
+# 3. 크롤링 엔진 (독일/유럽 아마존 정밀 추출)
 # ==========================================
 def fetch_product_info_from_url(url: str):
     headers = {
@@ -227,14 +227,14 @@ if "title_input" not in st.session_state:
     st.session_state["title_input"] = ""
 if "price_input" not in st.session_state:
     st.session_state["price_input"] = 20.0
-if "active_curr" not in st.session_state:
-    st.session_state["active_curr"] = "CNY"
+if "currency_radio" not in st.session_state:
+    st.session_state["currency_radio"] = "위안화 (CNY ¥)"
 
 def reset_data():
     st.session_state["url_input"] = ""
     st.session_state["title_input"] = ""
     st.session_state["price_input"] = 20.0
-    st.session_state["active_curr"] = "CNY"
+    st.session_state["currency_radio"] = "위안화 (CNY ¥)"
     st.rerun()
 
 # ==========================================
@@ -252,20 +252,18 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 통화 수동 수정을 위한 라디오
-    radio_curr = st.radio("소싱 통화 선택", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], horizontal=True)
-    if "유로화" in radio_curr:
-        st.session_state["active_curr"] = "EUR"
-    elif "위안화" in radio_curr:
-        st.session_state["active_curr"] = "CNY"
-    else:
-        st.session_state["active_curr"] = "KRW"
-        
-    # 현재 감지된 통화에 맞춘 기호 및 환율 결정
-    if st.session_state["active_curr"] == "EUR":
+    # 사이드바 라디오 위젯 (session_state key 연동)
+    currency_type = st.radio(
+        "소싱 통화 선택", 
+        ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], 
+        key="currency_radio",
+        horizontal=True
+    )
+    
+    if "유로화" in currency_type:
         default_rate = realtime_eur
         curr_symbol = "€"
-    elif st.session_state["active_curr"] == "CNY":
+    elif "위안화" in currency_type:
         default_rate = realtime_cny
         curr_symbol = "¥"
     else:
@@ -273,7 +271,7 @@ with st.sidebar:
         curr_symbol = "₩"
         
     exchange_rate = st.number_input("적용 환율", value=float(default_rate), step=1.0)
-    shipping_cost = st.number_input("배송비 (원)", value=12000 if "EUR" in st.session_state["active_curr"] else 8000, step=500)
+    shipping_cost = st.number_input("배송비 (원)", value=12000 if "EUR" in currency_type else 8000, step=500)
     extra_cost = st.number_input("기타 부대비용 (원)", value=1000, step=100)
 
 # ==========================================
@@ -301,8 +299,11 @@ with col_left:
                 f_title, f_price, f_curr = fetch_product_info_from_url(url_val)
                 st.session_state["url_input"] = url_val
                 
-                # 수집된 통화 세션 즉시 업데이트
-                st.session_state["active_curr"] = f_curr
+                # 핵심 패치: 독일 아마존 감지 시 사이드바 라디오 위젯 상태를 '유로화 (EUR €)'로 강제 고정
+                if f_curr == "EUR":
+                    st.session_state["currency_radio"] = "유로화 (EUR €)"
+                elif f_curr == "CNY":
+                    st.session_state["currency_radio"] = "위안화 (CNY ¥)"
                     
                 if f_title:
                     st.session_state["title_input"] = f_title
@@ -317,7 +318,6 @@ with col_left:
     
     c_p1, c_p2 = st.columns(2)
     with c_p1:
-        # st.session_state["active_curr"]에 기반한 정확한 통화 기호 표시
         sourcing_price = st.number_input(f"소싱 단가 ({curr_symbol})", value=float(st.session_state["price_input"]), step=1.0)
     with c_p2:
         target_price = st.number_input("목표 판매가 (KRW ₩)", value=49000, step=1000)
