@@ -58,7 +58,7 @@ def get_realtime_exchange_rates():
 realtime_usd, realtime_eur, realtime_cny = get_realtime_exchange_rates()
 
 # ==========================================
-# 3. 고도화된 스크래핑 엔진 (차단 우회 및 가격 자동 탐지)
+# 3. 독일 아마존 / 해외 소싱몰 전용 스크래핑 엔진
 # ==========================================
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -70,9 +70,12 @@ def fetch_product_info_from_url(url: str):
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1"
     }
     
     title = ""
@@ -84,49 +87,39 @@ def fetch_product_info_from_url(url: str):
         res = session.get(url, headers=headers, timeout=12, allow_redirects=True)
         final_url = res.url.lower()
         
-        if any(domain in final_url for domain in ["amazon.de", ".de", ".eu", "amazon.fr", "amazon.it"]):
+        # 통화 자동 판단 (amzn.eu 및 amazon.de)
+        if any(domain in final_url or domain in url.lower() for domain in ["amazon.de", ".de", "amzn.eu", ".eu", "amazon.fr", "amazon.it"]):
             curr = "EUR"
-        elif any(domain in final_url for domain in ["taobao", "1688", "tmall"]):
+        elif any(domain in final_url or domain in url.lower() for domain in ["taobao", "1688", "tmall"]):
             curr = "CNY"
             
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1) JSON-LD 구조화 데이터에서 탐색
-        for json_script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(json_script.string)
-                if isinstance(data, list):
-                    data = data[0]
-                if "name" in data and not title:
-                    title = data["name"]
-                if "offers" in data:
-                    offers = data["offers"]
-                    if isinstance(offers, list):
-                        offers = offers[0]
-                    if "price" in offers:
-                        price = float(str(offers["price"]).replace(',', '.'))
-            except Exception:
-                pass
+        # 1) 아마존 전용 Title 수집
+        title_tag = soup.find("span", id="productTitle") or soup.find("meta", property="og:title")
+        if title_tag:
+            title = title_tag.get("content", "") if title_tag.name == "meta" else title_tag.get_text()
+        elif soup.title and soup.title.string:
+            title = soup.title.string
+            
+        title = title.replace("Amazon.de:", "").replace("Amazon.de", "").strip()
 
-        # 2) HTML 메타태그 / 제목 선택자 탐색
-        if not title:
-            t_tag = soup.find(id="productTitle") or soup.find("meta", property="og:title") or soup.find("h1")
-            if t_tag:
-                title = t_tag.get("content", "") if t_tag.name == "meta" else t_tag.get_text()
-            elif soup.title and soup.title.string:
-                title = soup.title.string
-                
-        # 3) 가격 탐색 (멀티 셀렉터 패치)
+        # 2) 아마존 정밀 가격 수집 (독일 아마존 소수점/정수 조합 지원)
+        price_whole = soup.find("span", class_="a-price-whole")
+        price_fraction = soup.find("span", class_="a-price-fraction")
+        if price_whole:
+            w_text = re.sub(r'[^0-9]', '', price_whole.get_text())
+            f_text = re.sub(r'[^0-9]', '', price_fraction.get_text()) if price_fraction else "00"
+            if w_text:
+                try:
+                    price = float(f"{w_text}.{f_text}")
+                except Exception:
+                    price = 0.0
+
+        # 3) 가격 2차 보완 탐색 (a-offscreen 및 메타태그)
         if price == 0.0:
-            price_selectors = [
-                ("span", {"class": "a-price-whole"}),
-                ("span", {"class": "a-offscreen"}),
-                ("span", {"id": "priceblock_ourprice"}),
-                ("span", {"id": "priceblock_dealprice"}),
-                ("div", {"class": "priceToPay"})
-            ]
-            for tag_name, attrs in price_selectors:
-                p_elem = soup.find(tag_name, attrs)
+            for selector in [("span", "a-offscreen"), ("span", "priceblock_ourprice"), ("span", "priceblock_dealprice")]:
+                p_elem = soup.find(selector[0], class_=selector[1]) or soup.find(selector[0], id=selector[1])
                 if p_elem:
                     p_text = p_elem.get_text().replace(',', '.').replace('€', '').replace('¥', '').strip()
                     match = re.search(r'[\d.]+', p_text)
@@ -243,7 +236,26 @@ def calculate_margin(sourcing_price, curr_symbol, target_price, ex_rate, usd_rat
     return pd.DataFrame(results), total_cost, duty_tax
 
 # ==========================================
-# 4. 사이드바 UI
+# 4. 세션 관리 및 통화 자동 연동 로직
+# ==========================================
+if "url_input" not in st.session_state:
+    st.session_state["url_input"] = ""
+if "title_input" not in st.session_state:
+    st.session_state["title_input"] = ""
+if "price_input" not in st.session_state:
+    st.session_state["price_input"] = 20.0
+if "currency_selected" not in st.session_state:
+    st.session_state["currency_selected"] = "위안화 (CNY ¥)"
+
+def reset_data():
+    st.session_state["url_input"] = ""
+    st.session_state["title_input"] = ""
+    st.session_state["price_input"] = 20.0
+    st.session_state["currency_selected"] = "위안화 (CNY ¥)"
+    st.rerun()
+
+# ==========================================
+# 5. 사이드바 UI
 # ==========================================
 default_api_key = st.secrets.get("OPENAI_API_KEY", "")
 
@@ -256,7 +268,16 @@ with st.sidebar:
     model_choice = st.selectbox("AI 모델", ["gpt-4o-mini", "gpt-4o"], index=0)
     
     st.markdown("---")
-    currency_type = st.radio("소싱 통화", ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"], horizontal=True)
+    
+    # 통화 라디오 버튼 (세션 상태 강제 동기화)
+    currency_options = ["위안화 (CNY ¥)", "유로화 (EUR €)", "원화 (KRW ₩)"]
+    try:
+        curr_idx = currency_options.index(st.session_state["currency_selected"])
+    except Exception:
+        curr_idx = 0
+        
+    currency_type = st.radio("소싱 통화", currency_options, index=curr_idx, key="currency_radio", horizontal=True)
+    st.session_state["currency_selected"] = currency_type
     
     if "유로화" in currency_type:
         default_rate = realtime_eur
@@ -273,22 +294,6 @@ with st.sidebar:
     extra_cost = st.number_input("기타 부대비용 (원)", value=1000, step=100)
 
 # ==========================================
-# 5. 세션 관리 및 초기화 함수 (잔상 완전 제거)
-# ==========================================
-if "url_input" not in st.session_state:
-    st.session_state["url_input"] = ""
-if "title_input" not in st.session_state:
-    st.session_state["title_input"] = ""
-if "price_input" not in st.session_state:
-    st.session_state["price_input"] = 20.0
-
-def reset_data():
-    st.session_state["url_input"] = ""
-    st.session_state["title_input"] = ""
-    st.session_state["price_input"] = 20.0
-    st.rerun()
-
-# ==========================================
 # 6. 메인 레이아웃 UI
 # ==========================================
 st.title("⚡ SellOmni Pro :: AI SEO & 마진 분석기")
@@ -301,18 +306,24 @@ col_left, col_right = st.columns([1, 1], gap="medium")
 with col_left:
     st.subheader("1️⃣ 소싱 데이터 입력")
     
-    # URL 입력 및 자동 수집
     url_val = st.text_input(
         "소싱처 URL 입력", 
         value=st.session_state["url_input"], 
-        placeholder="https://amazon.de 또는 https://detail.1688.com..."
+        placeholder="https://amzn.eu 또는 https://amazon.de..."
     )
     
     if st.button("🔗 URL 데이터 가져오기", use_container_width=True):
         if url_val:
-            with st.spinner("해외 소싱몰 페이지 스크래핑 중..."):
+            with st.spinner("해외 소싱몰(독일 아마존 등) 파싱 중..."):
                 f_title, f_price, f_curr = fetch_product_info_from_url(url_val)
                 st.session_state["url_input"] = url_val
+                
+                # 독일/유럽 도메인 감지 시 통화 자동 유로화 전환
+                if f_curr == "EUR":
+                    st.session_state["currency_selected"] = "유로화 (EUR €)"
+                elif f_curr == "CNY":
+                    st.session_state["currency_selected"] = "위안화 (CNY ¥)"
+                    
                 if f_title:
                     st.session_state["title_input"] = f_title
                 if f_price > 0:
